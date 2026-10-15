@@ -1,8 +1,78 @@
 <!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Proyección · Encuesta</title><style>
 :root{font-family:system-ui,Arial;color:#22304b;background:#f5f7fc}*{box-sizing:border-box}body{margin:0}header{padding:24px 5%;background:white;border-bottom:1px solid #dde3ef}main{max-width:1050px;margin:32px auto;padding:0 20px}.panel{background:white;border:1px solid #dfe5ef;border-radius:18px;padding:28px;margin-bottom:18px}input{display:block;width:100%;padding:12px;margin:6px 0 14px;border:1px solid #cbd5e1;border-radius:9px;font:inherit}button{font:inherit;font-weight:700;background:#5266ce;color:white;border:0;border-radius:9px;padding:12px 20px;cursor:pointer}.muted{color:#65748b}.hidden{display:none}.option{margin:24px 0}.top{display:flex;justify-content:space-between;gap:20px;font-size:clamp(18px,2.5vw,28px);font-weight:700}.track{height:32px;background:#e8edf8;border-radius:10px;overflow:hidden;margin-top:10px}.fill{height:100%;background:#5367d5;transition:width .4s}#total{font-size:24px;font-weight:700}
 </style></head><body><header><h1>Resultados de preguntas</h1><p class="muted">Proyección de resultados · Sin acceso a controles de administración</p></header><main><section class="panel" id="setup"><h2>Conectar pantalla</h2><p class="muted">Usa solo la clave pública de Supabase, nunca una clave secreta.</p><label>URL del proyecto<input id="url" placeholder="https://proyecto.supabase.co"></label><label>Clave pública (publishable/anon)<input id="key" type="password"></label><label>Código de sesión<input id="code"></label><button id="start">Conectar</button><p id="error" role="status"></p></section><section class="panel hidden" id="display"><h2 id="heading">Esperando a la docente…</h2><p id="status" class="muted">Los resultados están ocultos hasta que la docente los habilite.</p><p id="total"></p><div id="bars"></div></section></main><script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script><script>
-const $=id=>document.getElementById(id);let db,timer;
-async function poll(){try{const {data,error}=await db.rpc('resultados_pregunta_cerrada',{p_codigo:$('code').value.trim().toUpperCase()});if(error)throw error;const rows=data||[];$('bars').replaceChildren();$('total').textContent='';if(!rows.length){$('heading').textContent='Esperando a la docente…';$('status').textContent='Resultados ocultos o sin alternativas disponibles.';return}const selections=rows.reduce((n,r)=>n+Number(r.cantidad),0);let total=selections;if(rows[0].tipo==='opcion_multiple'){const count=await db.rpc('total_participantes_opcion_multiple',{p_codigo:$('code').value.trim().toUpperCase()});if(count.error)throw count.error;total=Number(count.data||0)}$('heading').textContent=rows[0].enunciado||'Resultados';$('status').textContent=rows[0].tipo==='quiz'?'Quiz cerrado · Respuestas correctas señaladas con ✓':'Pregunta cerrada · Resultados finales';$('total').textContent=total+' participante(s)'+(rows[0].tipo==='opcion_multiple'?' · '+selections+' selecciones':'');for(const r of rows){const pct=total?100*Number(r.cantidad)/total:0;const option=document.createElement('div');option.className='option';const top=document.createElement('div');top.className='top';const name=document.createElement('span');name.textContent=(r.es_correcta===true?'✓ ':'')+r.texto;const count=document.createElement('span');count.textContent=Number(r.cantidad)+' · '+Math.round(pct)+' %';top.append(name,count);const track=document.createElement('div');track.className='track';const fill=document.createElement('div');fill.className='fill';fill.style.width=pct+'%';track.append(fill);option.append(top,track);$('bars').append(option)}}catch(e){$('heading').textContent='No se pudo actualizar';$('status').textContent=e.message;$('bars').replaceChildren();$('total').textContent=''}}
+const $=id=>document.getElementById(id);let db,timer,requestPending=false,lastRenderKey=null;
+function showResults(rows,total,selections){
+  // Comparar el contenido visible, no el orden ni los campos internos devueltos por Supabase.
+  const visibleRows=rows.map(r=>({
+    texto:String(r.texto??''), cantidad:Number(r.cantidad)||0,
+    es_correcta:r.es_correcta===true
+  }));
+  const heading=rows.length?(rows[0].enunciado||'Resultados'):'Esperando a la docente…';
+  const status=!rows.length?'Resultados ocultos o sin alternativas disponibles.':
+    rows[0].tipo==='quiz'?'Quiz cerrado · Respuestas correctas señaladas con ✓':'Pregunta cerrada · Resultados finales';
+  const totalText=rows.length?total+' participante(s)'+(rows[0].tipo==='opcion_multiple'?' · '+selections+' selecciones'):'';
+  // La consulta puede devolver las opciones en distinto orden. Ordenamos la comparación
+  // para que el mismo resultado nunca provoque un nuevo dibujo.
+  const signature=JSON.stringify({heading,status,totalText,options:visibleRows.map(r=>JSON.stringify(r)).sort()});
+  if(signature===lastRenderKey)return;
+  lastRenderKey=signature;
+  $('heading').textContent=heading;
+  $('status').textContent=status;
+  $('total').textContent=totalText;
+  // No borrar y reconstruir las barras existentes: actualizar cada una en su lugar.
+  const bars=$('bars');
+  const existing=new Map(Array.from(bars.children).map(el=>[el.dataset.option,el]));
+  const seen=new Set();
+  for(const r of visibleRows){
+    const key=r.texto+'\u0000'+String(r.es_correcta);
+    seen.add(key);
+    let option=existing.get(key);
+    if(!option){
+      option=document.createElement('div');option.className='option';option.dataset.option=key;
+      const top=document.createElement('div');top.className='top';
+      const name=document.createElement('span');name.className='option-name';
+      name.textContent=(r.es_correcta?'✓ ':'')+r.texto;
+      const count=document.createElement('span');count.className='option-count';
+      top.append(name,count);
+      const track=document.createElement('div');track.className='track';
+      const fill=document.createElement('div');fill.className='fill';track.append(fill);
+      option.append(top,track);bars.append(option);
+    }
+    const pct=total?100*r.cantidad/total:0;
+    const countText=r.cantidad+' · '+Math.round(pct)+' %';
+    const count=option.querySelector('.option-count');
+    if(count.textContent!==countText)count.textContent=countText;
+    const fill=option.querySelector('.fill');
+    const width=pct+'%';
+    if(fill.style.width!==width)fill.style.width=width;
+  }
+  for(const [key,el] of existing)if(!seen.has(key))el.remove();
+}
+async function poll(){
+  if(requestPending)return;
+  requestPending=true;
+  try{
+    const code=$('code').value.trim().toUpperCase();
+    const {data,error}=await db.rpc('resultados_pregunta_cerrada',{p_codigo:code});
+    if(error)throw error;
+    const rows=data||[];
+    let selections=0,total=0;
+    if(rows.length){
+      selections=rows.reduce((n,r)=>n+Number(r.cantidad),0);
+      total=selections;
+      if(rows[0].tipo==='opcion_multiple'){
+        const count=await db.rpc('total_participantes_opcion_multiple',{p_codigo:code});
+        if(count.error)throw count.error;
+        total=Number(count.data||0);
+      }
+    }
+    showResults(rows,total,selections);
+  }catch(e){
+    // Conservar los resultados anteriores ante una falla temporal de conexión.
+    $('status').textContent='No se pudo actualizar temporalmente. Reintentando…';
+  }finally{requestPending=false;}
+}
 $('start').onclick=async()=>{const url=$('url').value.trim().replace(/\/$/,''),key=$('key').value.trim(),code=$('code').value.trim().toUpperCase();if(!/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url)||!key||!code){$('error').textContent='Completa URL, clave pública y código.';return}if(!window.supabase){$('error').textContent='No se pudo cargar Supabase.';return}db=window.supabase.createClient(url,key,{auth:{persistSession:false,autoRefreshToken:false}});$('code').value=code;localStorage.setItem('quiz-supabase-public-config',JSON.stringify({url,key}));$('setup').classList.add('hidden');$('display').classList.remove('hidden');await poll();clearInterval(timer);timer=setInterval(poll,3000)};
 try{const cfg=JSON.parse(localStorage.getItem('quiz-supabase-public-config')||'{}');if(cfg.url)$('url').value=cfg.url;if(cfg.key)$('key').value=cfg.key}catch{}
 </script></body></html>
