@@ -11,7 +11,7 @@ function showResults(rows,total,selections){
   const heading=rows.length?(rows[0].enunciado||'Resultados'):'Esperando a la docente…';
   const status=!rows.length?'Resultados ocultos o sin alternativas disponibles.':
     rows[0].tipo==='quiz'?'Quiz cerrado · Respuestas correctas señaladas con ✓':'Pregunta cerrada · Resultados finales';
-  const totalText=rows.length?total+' participante(s)'+(rows[0].tipo==='opcion_multiple'?' · '+selections+' selecciones'):'';
+  const totalText=rows.length?total+' participante(s)'+(rows[0].tipo==='opcion_multiple'?' · '+selections+' selecciones':''):'';
   // La consulta puede devolver las opciones en distinto orden. Ordenamos la comparación
   // para que el mismo resultado nunca provoque un nuevo dibujo.
   const signature=JSON.stringify({heading,status,totalText,options:visibleRows.map(r=>JSON.stringify(r)).sort()});
